@@ -1,8 +1,8 @@
 const fs = require('fs').promises;
 const path = require('path');
 const process = require('process');
-const { authenticate } = require('@google-cloud/local-auth');
 const { google } = require('googleapis');
+const readline = require('readline');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/contacts.readonly',
@@ -17,7 +17,7 @@ const timezone = 'Europe/Berlin';
 /**
  * Reads previously authorized credentials from the save file.
  *
- * @return {Promise<OAuth2Client|null>}
+ * @return {Promise<import('google-auth-library').OAuth2Client|null>}
  */
 async function loadSavedCredentialsIfExist() {
   try {
@@ -32,7 +32,7 @@ async function loadSavedCredentialsIfExist() {
 /**
  * Serializes credentials to a file comptible with GoogleAUth.fromJSON.
  *
- * @param {OAuth2Client} client
+ * @param {import('google-auth-library').OAuth2Client} client
  * @return {Promise<void>}
  */
 async function saveCredentials(client) {
@@ -51,25 +51,51 @@ async function saveCredentials(client) {
 /**
  * Load or request authorization to call APIs.
  *
- * @returns {google.auth.OAuth2}
+ * @returns {Promise<import('google-auth-library').OAuth2Client|null>}
  */
 async function authorize() {
   let client = await loadSavedCredentialsIfExist();
-
   if (client) {
     return client;
   }
 
-  client = await authenticate({
-    scopes: SCOPES,
-    keyfilePath: CREDENTIALS_PATH,
+  const credentialsContent = await fs.readFile(CREDENTIALS_PATH);
+  const keys = JSON.parse(credentialsContent);
+  const key = keys.installed || keys.web;
+  const oAuth2Client = new google.auth.OAuth2(
+    key.client_id,
+    key.client_secret,
+    'urn:ietf:wg:oauth:2.0:oob'
+  );
+
+  const authUrl = oAuth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: SCOPES,
   });
 
-  if (client.credentials) {
-    await saveCredentials(client);
-  }
+  console.log('Authorize this app by visiting this url:', authUrl);
 
-  return client;
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const authCode = await new Promise((resolve) => {
+    rl.question('Enter the code from that page here: ', (code) => {
+      rl.close();
+      resolve(code);
+    });
+  });
+
+  try {
+    const { tokens } = await oAuth2Client.getToken(authCode.trim());
+    oAuth2Client.setCredentials(tokens);
+    await saveCredentials(oAuth2Client);
+    return oAuth2Client;
+  } catch (err) {
+    console.error('Error while trying to retrieve access token:', err.message);
+    return null;
+  }
 }
 
 /**
@@ -114,6 +140,8 @@ async function getBirthdayCalendar(auth) {
   const calendars = res.data.items;
 
   for (const calendar of calendars) {
+    console.log(calendar.summary);
+
     if (calendar.summary === calendarName) {
       return calendar;
     }
@@ -236,8 +264,12 @@ async function clearCalendar(auth, calendarId) {
  * Main entry point.
  */
 async function main() {
-  // Get authorized client
   const client = await authorize();
+
+  if (!client) {
+    console.log('Authentication failed. Exiting.');
+    return;
+  }
 
   // Get or create Birthday calendar
   const calendar =
